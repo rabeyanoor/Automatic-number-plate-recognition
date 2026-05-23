@@ -1,0 +1,11 @@
+# editor local history
+.history/
+# yolov9 checkout, weights and run outputs
+yolov9/
+*.pt
+runs/
+__pycache__/
+.ipynb_checkpoints/
+# credentials
+kaggle.json
+.env
