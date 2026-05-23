@@ -23,32 +23,53 @@ from utils.torch_utils import select_device, smart_inference_mode
 
 
 
+import csv
+import re
+
 import easyocr
-import cv2
 
-reader = easyocr.Reader(['en'], gpu=True)
+OCR_ALLOWLIST = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+_reader = None
 
-def perform_ocr_on_image(img, coordinates):
-    x, y, w, h = map(int, coordinates)
-    cropped_img = img[y:h, x:w]
 
-    gray_img = cv2.cvtColor(cropped_img, cv2.COLOR_RGB2GRAY)
-    results = reader.readtext(gray_img)
+def get_reader():
+    # Build EasyOCR lazily so `--help` stays fast; fall back to CPU when no GPU is present
+    global _reader
+    if _reader is None:
+        _reader = easyocr.Reader(['en'], gpu=torch.cuda.is_available())
+    return _reader
 
-    text = ""
-    for res in results:
-        if len(results) == 1 or (len(res[1]) > 6 and res[2] > 0.2):
-            text = res[1]
 
-    return str(text)
+def perform_ocr_on_image(img, coordinates, pad=0.05):
+    """Crop a detected plate from a BGR image and return (text, confidence)."""
+    x1, y1, x2, y2 = map(int, coordinates)
+    h, w = img.shape[:2]
+    px, py = int((x2 - x1) * pad), int((y2 - y1) * pad)
+    x1, y1, x2, y2 = max(0, x1 - px), max(0, y1 - py), min(w, x2 + px), min(h, y2 + py)
+    cropped_img = img[y1:y2, x1:x2]
+    if cropped_img.size == 0:
+        return '', 0.0
+
+    gray_img = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2GRAY)
+    if gray_img.shape[0] < 64:  # small plates read much better after upscaling
+        scale = 64 / gray_img.shape[0]
+        gray_img = cv2.resize(gray_img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    results = get_reader().readtext(gray_img, allowlist=OCR_ALLOWLIST, paragraph=False)
+
+    # Plates can be split over two lines, so join the confident pieces top-to-bottom, left-to-right
+    results = [r for r in results if r[2] > 0.1]
+    results.sort(key=lambda r: (round(min(p[1] for p in r[0]) / max(gray_img.shape[0] / 2, 1)), min(p[0] for p in r[0])))
+    text = re.sub(r'[^A-Z0-9]', '', ''.join(r[1].upper() for r in results))
+    conf = sum(r[2] for r in results) / len(results) if results else 0.0
+    return text, conf
 
 
 
 @smart_inference_mode()
 def run(
-        weights=ROOT / 'yolo.pt',  # model path or triton URL
+        weights=ROOT / 'best.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
-        data=ROOT / 'data/coco.yaml',  # dataset.yaml path
+        data=ROOT / 'yolov9/data/coco.yaml',  # dataset.yaml path
         imgsz=(640, 640),  # inference size (height, width)
         conf_thres=0.25,  # confidence threshold
         iou_thres=0.45,  # NMS IOU threshold
@@ -73,6 +94,7 @@ def run(
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
         vid_stride=1,  # video frame-rate stride
+        save_csv=False,  # save recognised plate text to plates.csv
 ):
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
@@ -86,6 +108,8 @@ def run(
     # Directories
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
+
+    csv_rows = []
 
     # Load model
     device = select_device(device)
@@ -162,15 +186,22 @@ def run(
                         with open(f'{txt_path}.txt', 'a') as f:
                             f.write(('%g ' * len(line)).rstrip() % line + '\n')
 
+                    c = int(cls)  # integer class
+                    text_ocr, ocr_conf = perform_ocr_on_image(im0, xyxy)  # EasyOCR on the plate crop
+                    if text_ocr:
+                        s += f'[{text_ocr}] '
+                    if save_csv:
+                        csv_rows.append([p.name, frame, text_ocr, f'{ocr_conf:.3f}', f'{float(conf):.3f}',
+                                         *[int(v) for v in xyxy]])
+
                     if save_img or save_crop or view_img:  # Add bbox to image
-                        c = int(cls)  # integer class
-                        label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
-
-                        # EasyOCR code
-                        text_ocr = perform_ocr_on_image(im0,xyxy)
-                        label = text_ocr
+                        if hide_labels:
+                            label = None
+                        elif text_ocr:
+                            label = text_ocr
+                        else:
+                            label = names[c] if hide_conf else f'{names[c]} {conf:.2f}'
                         annotator.box_label(xyxy, label, color=colors(c, True))
-
 
 
                     if save_crop:
@@ -208,6 +239,15 @@ def run(
         # Print time (inference-only)
         LOGGER.info(f"{s}{'' if len(det) else '(no detections), '}{dt[1].dt * 1E3:.1f}ms")
 
+    if isinstance(vid_writer[-1], cv2.VideoWriter):
+        vid_writer[-1].release()  # flush the last video so the file is playable
+    if save_csv:
+        with open(save_dir / 'plates.csv', 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['source', 'frame', 'plate_text', 'ocr_conf', 'det_conf', 'x1', 'y1', 'x2', 'y2'])
+            writer.writerows(csv_rows)
+        LOGGER.info(f"{len(csv_rows)} plate readings saved to {save_dir / 'plates.csv'}")
+
     # Print results
     t = tuple(x.t / seen * 1E3 for x in dt)  # speeds per image
     LOGGER.info(f'Speed: %.1fms pre-process, %.1fms inference, %.1fms NMS per image at shape {(1, 3, *imgsz)}' % t)
@@ -220,9 +260,9 @@ def run(
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolo.pt', help='model path or triton URL')
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'best.pt', help='model path or triton URL')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob/screen/0(webcam)')
-    parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
+    parser.add_argument('--data', type=str, default=ROOT / 'yolov9/data/coco.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.45, help='NMS IoU threshold')
@@ -247,6 +287,7 @@ def parse_opt():
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
     parser.add_argument('--vid-stride', type=int, default=1, help='video frame-rate stride')
+    parser.add_argument('--save-csv', action='store_true', help='save recognised plate text to plates.csv')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(vars(opt))
