@@ -9,3 +9,6 @@ __pycache__/
 # credentials
 kaggle.json
 .env
+
+# YouTube test clips (third-party copyright, keep local)
+test_videos/youtube_*
