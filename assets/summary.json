@@ -1,0 +1,32 @@
+{
+  "device": "cpu x4",
+  "epochs_planned": 15,
+  "epochs_completed": 15,
+  "img_size": 416,
+  "frozen_layers": 10,
+  "final_epoch_metrics": {
+    "metrics/precision": 0.98221,
+    "metrics/recall": 0.98009,
+    "metrics/mAP_0.5": 0.99401,
+    "metrics/mAP_0.5:0.95": 0.84075
+  },
+  "best_map50_95": 0.85113,
+  "video_detections": 547,
+  "video_top_plates": {
+    "SB4212": 41,
+    "NN773": 30,
+    "YB6433": 27,
+    "YN472": 16,
+    "TS5330": 14,
+    "KH527": 6,
+    "FTS5330": 5,
+    "VN472": 4,
+    "SX8525": 4,
+    "YA8262": 4,
+    "MA3867": 3,
+    "KW527": 3,
+    "SB4P12": 3,
+    "SB412": 3,
+    "FB643": 2
+  }
+}
