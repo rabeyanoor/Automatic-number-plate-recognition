@@ -10,6 +10,8 @@ FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLO root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
+if str(ROOT / 'yolov9') not in sys.path:
+    sys.path.append(str(ROOT / 'yolov9'))  # add yolov9 to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
 from models.common import DetectMultiBackend
